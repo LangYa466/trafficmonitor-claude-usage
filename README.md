@@ -77,6 +77,8 @@ C:\Program Files\TrafficMonitor\plugins\ClaudeUsage.dll
 
 - 插件接口照着 TrafficMonitor 的[插件开发指南](https://github.com/zhongyang219/TrafficMonitor/wiki/%E6%8F%92%E4%BB%B6%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97)写的
 - JSON 解析用 [nlohmann/json](https://github.com/nlohmann/json)
+- NodeSeek(https://nodeseek.com)
+- LinuxDo(https://linux.do/)
 
 ## License
 
