@@ -1,0 +1,22 @@
+# build output
+build/
+out/
+.vs/
+
+# binaries / intermediates
+*.dll
+*.lib
+*.exp
+*.pdb
+*.obj
+*.ilk
+
+# vs / cmake junk
+*.user
+CMakeSettings.json
+CMakeCache.txt
+CMakeFiles/
+
+# 插件运行时生成的
+ClaudeUsage.ini
+ClaudeUsage.log

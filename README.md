@@ -1,0 +1,86 @@
+# TrafficMonitor Claude 用量插件
+
+给 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 写的一个小插件，把 Claude 订阅用量丢到任务栏上盯着，省得动不动开浏览器看：
+
+```
+5h:  9 %
+7d: 20 %
+```
+
+上面是当前 5 小时窗口的用量，下面是 7 天窗口。数字右对齐，个位数自动补个空格，看起来整齐点。
+
+## 数据怎么来的
+
+跟 Claude Code 自己用的那套一样：
+
+- 读 `~/.claude/.credentials.json` 里的 `accessToken`
+- 拿它去打 `https://api.anthropic.com/api/oauth/usage`
+- 取响应里 `five_hour` / `seven_day` 的 `utilization`
+
+默认每 3 分钟刷一次（间隔能改，见下面）。打太勤会被限流（HTTP 429），别手贱调太低。
+
+## 出口节点校验
+
+我是挂代理用的，不太想让 token 从随便哪个出口节点裸奔出去。所以每次请求 usage 之前，会先 GET 一下 `https://claude.ai/cdn-cgi/trace`，看里面的 `colo`（Cloudflare 节点）和 `loc`（国家）：
+
+- 两个都跟设置里一致（默认 `NRT` / `JP`，也就是东京出口）才发请求
+- 对不上就跳过这次，弹个系统通知提醒一下（同一次掉到错误节点只提醒一次，不刷屏）
+
+用不上这功能的话，把 colo / loc 改成你当前出口的值就行。
+
+## 编译
+
+需要 MSVC（VS2022 Build Tools 就够）+ CMake：
+
+```
+cmake -S . -B build -A x64
+cmake --build build --config Release
+```
+
+产物是 `build/Release/ClaudeUsage.dll`，x64、静态链接 CRT，拷到别的机器也不用额外装运行库。
+
+> 插件位数要跟 TrafficMonitor 主程序对上。我的是 x64；如果你装的是 32 位版，改成 `-A Win32`。
+
+懒得自己编的话直接去 [Releases](https://github.com/LangYa466/trafficmonitor-claude-usage/releases) 下 dll。
+
+## 安装
+
+把 `ClaudeUsage.dll` 丢进 TrafficMonitor 安装目录下的 `plugins` 文件夹：
+
+```
+C:\Program Files\TrafficMonitor\plugins\ClaudeUsage.dll
+```
+
+重启 TrafficMonitor，右键任务栏 → 显示设置，把 **Claude 5h 用量 / Claude 7d 用量** 两项勾上。想上下两行就把它们放到不同行。
+
+## 设置
+
+右键插件 → 设置，能改这几个：
+
+| 项 | 说明 |
+| --- | --- |
+| colo | 期望的 Cloudflare 节点，默认 `NRT` |
+| loc | 期望的国家代码，默认 `JP` |
+| jsonpath | `credentials.json` 路径，留空就自动找 |
+| 间隔(分) | 刷新间隔，默认 3；填得比默认小会先警告 |
+
+配置存在 `plugins\ClaudeUsage.ini`。
+
+## 不显示 / 数值不动？
+
+插件会往 `plugins\ClaudeUsage.log` 写日志，每轮记一遍 trace 结果、节点匹没匹上、token 读到没、HTTP 状态、最后的百分比。出问题先看这个，一眼就知道卡在哪。
+
+常见的：
+
+- 一直 `--`：多半是节点对不上（看 log 里的 trace colo/loc），或者代理没开
+- `HTTP 429`：刷太勤了，等会儿就好，或者把间隔调大
+- 找不到 token：没登录 Claude Code，或者 credentials 不在默认位置，去设置里填 jsonpath
+
+## 致谢
+
+- 插件接口照着 TrafficMonitor 的[插件开发指南](https://github.com/zhongyang219/TrafficMonitor/wiki/%E6%8F%92%E4%BB%B6%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97)写的
+- JSON 解析用 [nlohmann/json](https://github.com/nlohmann/json)
+
+## License
+
+MIT
