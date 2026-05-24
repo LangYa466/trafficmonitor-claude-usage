@@ -1,10 +1,14 @@
-# TrafficMonitor Claude 用量插件
-
-给 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 写的一个小插件，把 Claude 订阅用量丢到任务栏上盯着，省得动不动开浏览器看：
-
 <img width="105" height="71" alt="image" src="https://github.com/user-attachments/assets/25681880-97d6-4f37-96c9-d315563f912c" />
 
-上面是当前 5 小时窗口的用量，下面是 7 天窗口。数字右对齐，个位数自动补个空格，看起来整齐点。
+## Star History
+
+<a href="https://www.star-history.com/?repos=LangYa466%2Ftrafficmonitor-claude-usage&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=LangYa466/trafficmonitor-claude-usage&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=LangYa466/trafficmonitor-claude-usage&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=LangYa466/trafficmonitor-claude-usage&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## 数据怎么来的
 
