@@ -2,10 +2,7 @@
 
 给 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 写的一个小插件，把 Claude 订阅用量丢到任务栏上盯着，省得动不动开浏览器看：
 
-```
-5h:  9 %
-7d: 20 %
-```
+<img width="105" height="71" alt="image" src="https://github.com/user-attachments/assets/25681880-97d6-4f37-96c9-d315563f912c" />
 
 上面是当前 5 小时窗口的用量，下面是 7 天窗口。数字右对齐，个位数自动补个空格，看起来整齐点。
 
