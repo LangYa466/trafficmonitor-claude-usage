@@ -12,6 +12,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <chrono>
 #include <fstream>
@@ -35,6 +36,7 @@ static constexpr wchar_t TRACE_PATH[]  = L"/cdn-cgi/trace";
 #define ID_EDIT_LOC      1002
 #define ID_EDIT_CRED     1003
 #define ID_EDIT_INTERVAL 1004
+#define ID_CHECK_MANUAL  1005
 
 HINSTANCE g_hModule = nullptr;
 
@@ -225,6 +227,8 @@ static void ParseTrace(const std::string& body, std::string& colo, std::string& 
     }
 }
 
+class ClaudeUsagePlugin;   // 下面 OnMouseEvent 要回调单例
+
 // 一个显示项目（5h 或 7d）
 class UsageItem : public IPluginItem
 {
@@ -249,6 +253,17 @@ public:
         m_value = m_prefix + num + L" %";
     }
 
+    // 手动刷新进行中：显示一个滚动的字符动画，让用户看到「正在刷新」
+    void SetRefreshing(int frame)
+    {
+        static const wchar_t sp[] = { L'|', L'/', L'-', L'\\' };
+        wchar_t c = sp[(unsigned)frame & 3];
+        m_value = m_prefix + L"  " + std::wstring(1, c);
+    }
+
+    // 左键点击任一项 → 立刻手动刷新一次（定义在插件类之后）
+    int OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) override;
+
 private:
     std::wstring m_name, m_id, m_prefix, m_value, m_sample;
 };
@@ -272,8 +287,21 @@ public:
     // 主程序定时调用：刷新显示项目 + 在主线程派发待处理的通知
     void DataRequired() override
     {
-        m_fiveHour.SetPercent(m_fivePct.load());
-        m_sevenDay.SetPercent(m_sevenPct.load());
+        // 手动刷新中（含点击后至少 MIN_SPIN_MS 的最短显示窗口）走滚动动画，
+        // 否则正常显示百分比。最短窗口保证就算刷新很快也能看到动画。
+        bool spin = m_refreshing.load() ||
+                    (GetTickCount64() - m_refreshStart.load() < MIN_SPIN_MS);
+        if (spin)
+        {
+            m_fiveHour.SetRefreshing(m_animFrame);
+            m_sevenDay.SetRefreshing(m_animFrame);
+            ++m_animFrame;
+        }
+        else
+        {
+            m_fiveHour.SetPercent(m_fivePct.load());
+            m_sevenDay.SetPercent(m_sevenPct.load());
+        }
 
         if (m_hasPendingNotify.exchange(false) && m_pApp)
         {
@@ -291,7 +319,7 @@ public:
         case TMI_DESCRIPTION: return L"在任务栏显示 Claude 订阅用量（5h / 7d），请求前校验出口节点";
         case TMI_AUTHOR:      return L"LangYa";
         case TMI_COPYRIGHT:   return L"MIT License";
-        case TMI_VERSION:     return L"1.0.0";
+        case TMI_VERSION:     return L"1.2.0";
         case TMI_URL:         return L"https://github.com/LangYa466/trafficmonitor-claude-usage";
         default:              return L"";
         }
@@ -331,7 +359,7 @@ public:
 
     // 下面两个给设置对话框读写配置用
     void GetConfigW(std::wstring& colo, std::wstring& loc, std::wstring& credPath,
-                    std::wstring& intervalMin)
+                    std::wstring& intervalMin, bool& manualFirst)
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         colo        = A2W(m_cfgColo);
@@ -339,10 +367,11 @@ public:
         // 未手动指定时，对话框里预填自动查找的默认路径
         credPath    = m_cfgCredPath.empty() ? DefaultCredPath() : m_cfgCredPath;
         intervalMin = std::to_wstring(m_cfgIntervalMin);
+        manualFirst = m_cfgManualFirst;
     }
 
     void SaveConfig(const std::wstring& colo, const std::wstring& loc,
-                    const std::wstring& credPath, int intervalMin)
+                    const std::wstring& credPath, int intervalMin, bool manualFirst)
     {
         if (intervalMin < 1) intervalMin = 1;
         if (!m_iniPath.empty())
@@ -353,13 +382,25 @@ public:
                                        credPath.c_str(), m_iniPath.c_str());
             WritePrivateProfileStringW(L"refresh", L"interval_min",
                                        std::to_wstring(intervalMin).c_str(), m_iniPath.c_str());
+            WritePrivateProfileStringW(L"refresh", L"manual_first",
+                                       manualFirst ? L"1" : L"0", m_iniPath.c_str());
         }
         std::lock_guard<std::mutex> lk(m_mutex);
         m_cfgColo        = W2A(colo);
         m_cfgLoc         = W2A(loc);
         m_cfgCredPath    = credPath;
         m_cfgIntervalMin = intervalMin;
+        m_cfgManualFirst = manualFirst;
         m_lastGeo.store(GEO_UNKNOWN);   // 配置变了，重新评估匹配状态
+    }
+
+    // 点击显示项触发：唤醒 worker 立刻刷新一次，失败会走系统通知
+    void TriggerManualRefresh()
+    {
+        m_refreshStart.store(GetTickCount64());   // 动画最短显示窗口起点
+        m_refreshing.store(true);
+        m_manualPending.store(true);
+        m_wakeCv.notify_one();
     }
 
 private:
@@ -373,6 +414,7 @@ private:
         , m_cfgColo("NRT")
         , m_cfgLoc("JP")
         , m_cfgIntervalMin(DEFAULT_INTERVAL_MIN)
+        , m_cfgManualFirst(false)
     {}
 
     // 由配置目录推导 ini / log 路径
@@ -418,9 +460,14 @@ private:
             credPath = pbuf;
         }
         int interval = DEFAULT_INTERVAL_MIN;
+        bool manualFirst = false;
         if (!m_iniPath.empty())
+        {
             interval = (int)GetPrivateProfileIntW(L"refresh", L"interval_min",
                                                   DEFAULT_INTERVAL_MIN, m_iniPath.c_str());
+            manualFirst = GetPrivateProfileIntW(L"refresh", L"manual_first", 0,
+                                                m_iniPath.c_str()) != 0;
+        }
         if (interval < 1) interval = 1;
 
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -428,17 +475,41 @@ private:
         m_cfgLoc         = W2A(loc);
         m_cfgCredPath    = credPath;
         m_cfgIntervalMin = interval;
+        m_cfgManualFirst = manualFirst;
     }
 
     void Worker()
     {
+        bool firstDone = false;          // 是否已经成功跑过一次（含手动触发的首次）
         for (;;)
         {
-            Fetch();
+            bool manual = m_manualPending.exchange(false);
+
+            bool manualFirst;
+            { std::lock_guard<std::mutex> lk(m_mutex); manualFirst = m_cfgManualFirst; }
+
+            // 「首次需手动」开启时：在第一次手动点击之前不自动拉，
+            // 避免开机后出口/token 没就绪时误报失败、让人摸不着头脑。
+            if (manualFirst && !firstDone && !manual)
+            {
+                SetTooltip(L"已开启“首次需手动刷新”，请点击任务栏 5h/7d 触发第一次获取");
+                m_refreshing.store(false);
+            }
+            else
+            {
+                Fetch(manual);
+                if (manual) m_refreshing.store(false);   // 刷新结束，停止动画
+                firstDone = true;
+            }
+
             int mins;
             { std::lock_guard<std::mutex> lk(m_mutex); mins = m_cfgIntervalMin; }
             if (mins < 1) mins = 1;
-            std::this_thread::sleep_for(std::chrono::seconds(mins * 60));
+
+            // 睡到下一个间隔，期间被 TriggerManualRefresh 唤醒就提前返回
+            std::unique_lock<std::mutex> lk(m_wakeMutex);
+            m_wakeCv.wait_for(lk, std::chrono::seconds(mins * 60),
+                              [this] { return m_manualPending.load(); });
         }
     }
 
@@ -446,6 +517,13 @@ private:
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_tooltip = s;
+    }
+
+    // 排队一条系统通知，由 DataRequired 在主线程派发
+    void QueueNotify(const std::wstring& msg)
+    {
+        { std::lock_guard<std::mutex> lk(m_mutex); m_pendingNotifyMsg = msg; }
+        m_hasPendingNotify.store(true);
     }
 
     // 进入“不匹配”状态时通知一次（不重复）
@@ -467,8 +545,16 @@ private:
         }
     }
 
-    void Fetch()
+    // manual=true 表示用户点击触发的手动刷新；失败时额外弹系统通知说明原因
+    void Fetch(bool manual)
     {
+        // 失败时统一出口：写 tooltip，手动刷新还要弹通知
+        auto fail = [&](const std::wstring& reason)
+        {
+            SetTooltip(reason);
+            if (manual) QueueNotify(L"Claude 用量刷新失败：\n" + reason);
+        };
+
         std::string cfgColo, cfgLoc;
         std::wstring cfgCredPath;
         {
@@ -476,7 +562,8 @@ private:
             cfgColo = m_cfgColo; cfgLoc = m_cfgLoc; cfgCredPath = m_cfgCredPath;
         }
 
-        Log(L"--- Fetch 开始 (期望 colo=" + A2W(cfgColo) + L" loc=" + A2W(cfgLoc) + L") ---");
+        Log(std::wstring(L"--- Fetch 开始 (") + (manual ? L"手动 " : L"自动 ") +
+            L"期望 colo=" + A2W(cfgColo) + L" loc=" + A2W(cfgLoc) + L") ---");
 
         // ── 1. 出口节点检查 ──────────────────────────────────────────
         std::string traceBody; DWORD st = 0;
@@ -484,7 +571,7 @@ private:
         {
             m_lastGeo.store(GEO_ERROR);
             Log(L"trace 请求失败 (status=" + std::to_wstring(st) + L")，跳过");
-            SetTooltip(L"无法连接 claude.ai 校验出口节点");
+            fail(L"无法连接 claude.ai 校验出口节点");
             return;
         }
 
@@ -497,8 +584,8 @@ private:
         {
             Log(L"节点不匹配，暂停 API 请求");
             OnGeoState(GEO_MISMATCH, colo, loc, cfgColo, cfgLoc);
-            SetTooltip(L"出口节点不匹配：colo=" + A2W(colo) + L" loc=" + A2W(loc) +
-                       L"（需 " + A2W(cfgColo) + L"/" + A2W(cfgLoc) + L"），已暂停请求");
+            fail(L"出口节点不匹配：colo=" + A2W(colo) + L" loc=" + A2W(loc) +
+                 L"（需 " + A2W(cfgColo) + L"/" + A2W(cfgLoc) + L"），已暂停请求");
             return;   // 不请求 API
         }
         Log(L"节点匹配，继续请求用量");
@@ -509,7 +596,7 @@ private:
         if (token.empty())
         {
             Log(L"未找到 token（cred 路径=" + (cfgCredPath.empty() ? L"自动" : cfgCredPath) + L"）");
-            SetTooltip(L"找不到 OAuth token，请先登录 Claude Code 或在设置里指定 json 路径");
+            fail(L"找不到 OAuth token，请先登录 Claude Code 或在设置里指定 json 路径");
             return;
         }
         Log(L"已读取 token，长度=" + std::to_wstring(token.size()));
@@ -524,10 +611,10 @@ private:
         if (!HttpsGet(API_HOST, API_PATH, headers, body, status))
         {
             Log(L"用量请求失败 (HTTP status=" + std::to_wstring(status) + L")");
-            if (status == 429)      SetTooltip(L"API 被限流（429），稍后重试");
-            else if (status == 401) SetTooltip(L"Token 已过期，请重新登录");
-            else if (status != 0)   SetTooltip(L"HTTP 错误：" + std::to_wstring(status));
-            else                    SetTooltip(L"网络错误");
+            if (status == 429)      fail(L"API 被限流（429），稍后重试");
+            else if (status == 401) fail(L"Token 已过期，请重新登录");
+            else if (status != 0)   fail(L"HTTP 错误：" + std::to_wstring(status));
+            else                    fail(L"网络错误");
             return;
         }
 
@@ -547,7 +634,7 @@ private:
         catch (...)
         {
             Log(L"解析用量 JSON 失败，body 前 200 字符: " + A2W(body.substr(0, 200)));
-            SetTooltip(L"解析用量数据失败");
+            fail(L"解析用量数据失败");
         }
     }
 
@@ -559,6 +646,17 @@ private:
     std::atomic<bool> m_started{ false };
     std::atomic<int>  m_lastGeo{ GEO_UNKNOWN };
     std::atomic<bool> m_hasPendingNotify{ false };
+    std::atomic<bool> m_manualPending{ false };   // 点击触发的手动刷新待处理
+
+    // 手动刷新动画：m_refreshing 标记刷新中，m_refreshStart 给一个最短显示窗口，
+    // m_animFrame 只在 DataRequired（主线程）里读写。
+    static constexpr unsigned long long MIN_SPIN_MS = 600;
+    std::atomic<bool>               m_refreshing{ false };
+    std::atomic<unsigned long long> m_refreshStart{ 0 };
+    int                             m_animFrame{ 0 };
+
+    std::mutex              m_wakeMutex;           // 配合 m_wakeCv 唤醒 worker
+    std::condition_variable m_wakeCv;
 
     ITrafficMonitor* m_pApp{ nullptr };
     std::wstring      m_iniPath;
@@ -571,7 +669,19 @@ private:
     std::string  m_cfgLoc;
     std::wstring m_cfgCredPath;      // 手动指定的 credentials.json 路径（空=自动查找）
     int          m_cfgIntervalMin;   // 刷新间隔（分钟）
+    bool         m_cfgManualFirst;   // 开机后首次必须手动触发，不自动拉
 };
+
+// 左键点击 5h/7d 任一项，立刻强制刷新一次
+int UsageItem::OnMouseEvent(MouseEventType type, int, int, void*, int)
+{
+    if (type == MT_LCLICKED || type == MT_DBCLICKED)
+    {
+        ClaudeUsagePlugin::Instance().TriggerManualRefresh();
+        return 1;
+    }
+    return 0;
+}
 
 // 设置对话框。懒得弄 .rc 资源文件，直接在内存里拼 DLGTEMPLATE
 namespace {
@@ -607,11 +717,14 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (self)
         {
             std::wstring colo, loc, cred, interval;
-            self->GetConfigW(colo, loc, cred, interval);
+            bool manualFirst = false;
+            self->GetConfigW(colo, loc, cred, interval, manualFirst);
             SetDlgItemTextW(hWnd, ID_EDIT_COLO,     colo.c_str());
             SetDlgItemTextW(hWnd, ID_EDIT_LOC,      loc.c_str());
             SetDlgItemTextW(hWnd, ID_EDIT_CRED,     cred.c_str());
             SetDlgItemTextW(hWnd, ID_EDIT_INTERVAL, interval.c_str());
+            CheckDlgButton(hWnd, ID_CHECK_MANUAL,
+                           manualFirst ? BST_CHECKED : BST_UNCHECKED);
         }
         return TRUE;
     }
@@ -626,6 +739,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetDlgItemTextW(hWnd, ID_EDIT_LOC,      bLoc, 128);
             GetDlgItemTextW(hWnd, ID_EDIT_CRED,     bCred, MAX_PATH);
             GetDlgItemTextW(hWnd, ID_EDIT_INTERVAL, bInt, 32);
+            bool manualFirst = (IsDlgButtonChecked(hWnd, ID_CHECK_MANUAL) == BST_CHECKED);
 
             int interval = _wtoi(bInt);
             if (interval < 1) interval = 1;
@@ -639,7 +753,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                                 MB_ICONWARNING | MB_YESNO) != IDYES)
                     return TRUE;   // 用户取消，留在对话框继续编辑
             }
-            if (self) self->SaveConfig(bColo, bLoc, bCred, interval);
+            if (self) self->SaveConfig(bColo, bLoc, bCred, interval, manualFirst);
             EndDialog(hWnd, IDOK);
             return TRUE;
         }
@@ -660,9 +774,9 @@ ITMPlugin::OptionReturn ClaudeUsagePlugin::ShowOptionsDialog(void* hParent)
     DWORD style = DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU;
     t.W32(style);
     t.W32(0);                       // exStyle
-    t.W16(11);                      // 控件数量
+    t.W16(13);                      // 控件数量
     t.W16(0); t.W16(0);             // x, y
-    t.W16(300); t.W16(146);         // cx, cy
+    t.W16(300); t.W16(200);         // cx, cy
     t.W16(0);                       // 无菜单
     t.W16(0);                       // 默认窗口类
     t.Str(L"Claude 用量设置");      // 标题
@@ -678,8 +792,10 @@ ITMPlugin::OptionReturn ClaudeUsagePlugin::ShowOptionsDialog(void* hParent)
     t.Item(WS_CHILD | WS_VISIBLE,                                            12, 80, 46, 10, 0xFFFF, 0x0082, L"间隔(分):");
     t.Item(WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 62, 78, 40, 12, ID_EDIT_INTERVAL, 0x0081, L"");
     t.Item(WS_CHILD | WS_VISIBLE,                                            12, 98, 276, 18, 0xFFFF, 0x0082, L"默认 3 分钟；小于默认值容易被 API 速率限制 (HTTP 429)。");
-    t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,           176, 120, 52, 14, IDOK, 0x0080, L"确定");
-    t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,              236, 120, 52, 14, IDCANCEL, 0x0080, L"取消");
+    t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,             12, 120, 276, 12, ID_CHECK_MANUAL, 0x0080, L"开机后首次必须手动刷新（不自动获取）");
+    t.Item(WS_CHILD | WS_VISIBLE,                                            12, 136, 276, 36, 0xFFFF, 0x0082, L"勾选后开机不自动拉，需手动点一次 5h/7d 触发首次获取。观测到：开机后若没用 Claude Code，出口节点/token 常常还没就绪，自动获取会失败且看不出原因。（仍需出口校验通过后才会拉取用量）");
+    t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,           176, 178, 52, 14, IDOK, 0x0080, L"确定");
+    t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,              236, 178, 52, 14, IDCANCEL, 0x0080, L"取消");
 
     INT_PTR r = DialogBoxIndirectParamW(g_hModule,
                                         (LPCDLGTEMPLATEW)t.b.data(),

@@ -55,6 +55,10 @@ C:\Program Files\TrafficMonitor\plugins\ClaudeUsage.dll
 
 重启 TrafficMonitor，右键任务栏 → 显示设置，把 **Claude 5h 用量 / Claude 7d 用量** 两项勾上。想上下两行就把它们放到不同行。
 
+## 手动刷新
+
+不想等下一轮间隔的话，左键点一下任务栏上的 5h / 7d 数字，就立刻强制刷新一次。刷新进行中，数字会变成一个滚动的字符（`| / - \`）动画，让你确认确实触发了；刷完再变回百分比。手动刷新要是失败了（节点不匹配、没 token、429、网络错误等），会弹一条系统通知说明简单原因，不用专门去翻 log。
+
 ## 设置
 
 右键插件 → 设置，能改这几个：
@@ -65,6 +69,7 @@ C:\Program Files\TrafficMonitor\plugins\ClaudeUsage.dll
 | loc | 期望的国家代码，默认 `JP` |
 | jsonpath | `credentials.json` 路径，留空就自动找 |
 | 间隔(分) | 刷新间隔，默认 3；填得比默认小会先警告 |
+| 开机后首次必须手动刷新 | 勾上后开机不自动拉，要你手动点一次 5h/7d 才触发首次获取。开机后还没用 Claude Code 时，出口节点 / token 常常没就绪，自动拉会失败又看不出原因——这个选项就是为了避开它。 |
 
 配置存在 `plugins\ClaudeUsage.ini`。
 
