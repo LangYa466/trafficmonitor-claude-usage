@@ -18,6 +18,7 @@
 #include <fstream>
 #include <sstream>
 #include <cctype>
+#include <cstdio>
 
 #include "PluginInterface.h"
 #include "json.hpp"
@@ -211,6 +212,59 @@ static int ExtractUtilization(const json& data, const char* key)
     return -1;
 }
 
+// 从 five_hour / seven_day 对象里取重置时间，格式化成本地「HH:MM（还有 XhYm）」。
+// 兼容字段为 ISO 字符串（"2026-05-30T15:00:00Z"）或 epoch 秒数两种写法；取不到返回空。
+static std::wstring FormatResetField(const json& obj)
+{
+    static const char* keys[] = { "resets_at", "reset_at", "resetsAt", "resets" };
+    const json* val = nullptr;
+    for (const char* k : keys)
+        if (obj.contains(k) && !obj[k].is_null()) { val = &obj[k]; break; }
+    if (!val) return {};
+
+    ULARGE_INTEGER reset;   // 重置时刻，FILETIME（1601 起的 100ns 计）
+    if (val->is_number())
+    {
+        long long epoch = (long long)(val->get<double>());   // epoch 秒
+        reset.QuadPart = (ULONGLONG)epoch * 10000000ULL + 116444736000000000ULL;
+    }
+    else if (val->is_string())
+    {
+        std::string iso = val->get<std::string>();
+        int Y, M, D, h, mi, s;
+        if (sscanf_s(iso.c_str(), "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &mi, &s) != 6)
+            return {};
+        SYSTEMTIME utc{};
+        utc.wYear = (WORD)Y; utc.wMonth = (WORD)M; utc.wDay = (WORD)D;
+        utc.wHour = (WORD)h; utc.wMinute = (WORD)mi; utc.wSecond = (WORD)s;
+        FILETIME ft;
+        if (!SystemTimeToFileTime(&utc, &ft)) return {};
+        reset.LowPart = ft.dwLowDateTime; reset.HighPart = ft.dwHighDateTime;
+    }
+    else return {};
+
+    // 转本地时间显示 HH:MM
+    FILETIME ftReset; ftReset.dwLowDateTime = reset.LowPart; ftReset.dwHighDateTime = reset.HighPart;
+    SYSTEMTIME utc2{}, local2{};
+    if (!FileTimeToSystemTime(&ftReset, &utc2)) return {};
+    if (!SystemTimeToTzSpecificLocalTime(nullptr, &utc2, &local2)) return {};
+
+    wchar_t buf[64];
+    swprintf(buf, 64, L"%02d:%02d", local2.wHour, local2.wMinute);
+    std::wstring t = buf;
+
+    // 还有多久（重置时刻 - 现在）
+    FILETIME ftNow; GetSystemTimeAsFileTime(&ftNow);
+    ULARGE_INTEGER now; now.LowPart = ftNow.dwLowDateTime; now.HighPart = ftNow.dwHighDateTime;
+    if (reset.QuadPart > now.QuadPart)
+    {
+        long long mins = (long long)((reset.QuadPart - now.QuadPart) / 600000000ULL);   // 100ns → 分钟
+        swprintf(buf, 64, L"（还有 %lldh%02lldm）", mins / 60, mins % 60);
+        t += buf;
+    }
+    return t;
+}
+
 // 解析 cdn-cgi/trace 的 key=value 文本，取 colo / loc
 static void ParseTrace(const std::string& body, std::string& colo, std::string& loc)
 {
@@ -319,7 +373,7 @@ public:
         case TMI_DESCRIPTION: return L"在任务栏显示 Claude 订阅用量（5h / 7d），请求前校验出口节点";
         case TMI_AUTHOR:      return L"LangYa";
         case TMI_COPYRIGHT:   return L"MIT License";
-        case TMI_VERSION:     return L"1.2.0";
+        case TMI_VERSION:     return L"1.3.0";
         case TMI_URL:         return L"https://github.com/LangYa466/trafficmonitor-claude-usage";
         default:              return L"";
         }
@@ -629,7 +683,15 @@ private:
 
             std::wstring fv = m_fivePct.load() < 0 ? L"-- %" : std::to_wstring(m_fivePct.load()) + L" %";
             std::wstring sv = m_sevenPct.load() < 0 ? L"-- %" : std::to_wstring(m_sevenPct.load()) + L" %";
-            SetTooltip(L"5h: " + fv + L"   7d: " + sv + L"   (" + A2W(colo) + L"/" + A2W(loc) + L")");
+            std::wstring tip = L"5h: " + fv + L"   7d: " + sv + L"   (" + A2W(colo) + L"/" + A2W(loc) + L")";
+
+            // 下次 5h 窗口重置时间（取 five_hour.resets_at），有就追加一行
+            if (data.contains("five_hour") && data["five_hour"].is_object())
+            {
+                std::wstring rs = FormatResetField(data["five_hour"]);
+                if (!rs.empty()) tip += L"\n下次 5h 重置: " + rs;
+            }
+            SetTooltip(tip);
         }
         catch (...)
         {
