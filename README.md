@@ -3,6 +3,8 @@
 
 ## Star History
 
+## Gnome版本: https://github.com/LangYa466/claude-usage-gnome
+
 <a href="https://www.star-history.com/?repos=LangYa466%2Ftrafficmonitor-claude-usage&type=date&legend=top-left">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=LangYa466/trafficmonitor-claude-usage&type=date&theme=dark&legend=top-left" />
