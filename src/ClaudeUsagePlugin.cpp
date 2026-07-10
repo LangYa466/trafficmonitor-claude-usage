@@ -373,7 +373,7 @@ public:
         case TMI_DESCRIPTION: return L"在任务栏显示 Claude 订阅用量（5h / 7d），请求前校验出口节点";
         case TMI_AUTHOR:      return L"LangYa";
         case TMI_COPYRIGHT:   return L"MIT License";
-        case TMI_VERSION:     return L"1.3.0";
+        case TMI_VERSION:     return L"1.4.0";
         case TMI_URL:         return L"https://github.com/LangYa466/trafficmonitor-claude-usage";
         default:              return L"";
         }
@@ -620,6 +620,16 @@ private:
             L"期望 colo=" + A2W(cfgColo) + L" loc=" + A2W(cfgLoc) + L") ---");
 
         // ── 1. 出口节点检查 ──────────────────────────────────────────
+        // colo 或 loc 填 "off" 视为关闭出口节点校验（例如走中转 API 的场景）
+        bool geoCheckOff = IEquals(cfgColo, "off") || IEquals(cfgLoc, "off");
+        std::string colo, loc;
+        if (geoCheckOff)
+        {
+            Log(L"出口节点检查已关闭（colo/loc=off），跳过 trace");
+            m_lastGeo.store(GEO_OK);
+        }
+        else
+        {
         std::string traceBody; DWORD st = 0;
         if (!HttpsGet(TRACE_HOST, TRACE_PATH, L"", traceBody, st))
         {
@@ -629,7 +639,6 @@ private:
             return;
         }
 
-        std::string colo, loc;
         ParseTrace(traceBody, colo, loc);
         Log(L"trace 结果: colo=" + A2W(colo) + L" loc=" + A2W(loc));
 
@@ -644,6 +653,7 @@ private:
         }
         Log(L"节点匹配，继续请求用量");
         OnGeoState(GEO_OK, colo, loc, cfgColo, cfgLoc);
+        }
 
         // ── 2. 请求用量（节点匹配才执行）─────────────────────────────
         std::string token = LoadAccessToken(cfgCredPath);
@@ -683,7 +693,9 @@ private:
 
             std::wstring fv = m_fivePct.load() < 0 ? L"-- %" : std::to_wstring(m_fivePct.load()) + L" %";
             std::wstring sv = m_sevenPct.load() < 0 ? L"-- %" : std::to_wstring(m_sevenPct.load()) + L" %";
-            std::wstring tip = L"5h: " + fv + L"   7d: " + sv + L"   (" + A2W(colo) + L"/" + A2W(loc) + L")";
+            std::wstring geoTag = geoCheckOff ? std::wstring(L"off")
+                                              : (A2W(colo) + L"/" + A2W(loc));
+            std::wstring tip = L"5h: " + fv + L"   7d: " + sv + L"   (" + geoTag + L")";
 
             // 下次 5h 窗口重置时间（取 five_hour.resets_at），有就追加一行
             if (data.contains("five_hour") && data["five_hour"].is_object())
@@ -853,7 +865,7 @@ ITMPlugin::OptionReturn ClaudeUsagePlugin::ShowOptionsDialog(void* hParent)
     t.Item(WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,  62, 56, 226, 12, ID_EDIT_CRED, 0x0081, L"");
     t.Item(WS_CHILD | WS_VISIBLE,                                            12, 80, 46, 10, 0xFFFF, 0x0082, L"间隔(分):");
     t.Item(WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 62, 78, 40, 12, ID_EDIT_INTERVAL, 0x0081, L"");
-    t.Item(WS_CHILD | WS_VISIBLE,                                            12, 98, 276, 18, 0xFFFF, 0x0082, L"默认 3 分钟；小于默认值容易被 API 速率限制 (HTTP 429)。");
+    t.Item(WS_CHILD | WS_VISIBLE,                                            12, 98, 276, 18, 0xFFFF, 0x0082, L"默认 3 分钟；小于默认值容易被 API 速率限制 (HTTP 429)。colo 或 loc 填 off 可关闭出口节点校验（走中转 API 时用）。");
     t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,             12, 120, 276, 12, ID_CHECK_MANUAL, 0x0080, L"开机后首次必须手动刷新（不自动获取）");
     t.Item(WS_CHILD | WS_VISIBLE,                                            12, 136, 276, 36, 0xFFFF, 0x0082, L"勾选后开机不自动拉，需手动点一次 5h/7d 触发首次获取。观测到：开机后若没用 Claude Code，出口节点/token 常常还没就绪，自动获取会失败且看不出原因。（仍需出口校验通过后才会拉取用量）");
     t.Item(WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,           176, 178, 52, 14, IDOK, 0x0080, L"确定");
